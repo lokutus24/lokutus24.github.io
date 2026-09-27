@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>YouTube HU TV Player Bridge</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background-color: #000000;
+      overflow: hidden;
+    }
+    #player {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0;
+      left: 0;
+      border: 0;
+    }
+    .ytp-caption-window-bottom, .caption-window, .ytp-subtitles-player-content {
+      display: none !important;
+      opacity: 0 !important;
+      visibility: hidden !important;
+    }
+  </style>
+</head>
+<body>
+  <div id="player"></div>
+
+  <script>
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+      let currentVideoId = params.get('v') || 'dQw4w9WgXcQ';
+      let autoplay = params.get('autoplay') === '0' ? 0 : 1;
+      let start = parseInt(params.get('start') || '0', 10);
+
+      let player = null;
+      let timeInterval = null;
+      let isReady = false;
+
+      function postToParent(msg) {
+        try {
+          if (window.parent && window.parent !== window) {
+            window.parent.postMessage(msg, '*');
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      function startTimeTracking() {
+        if (timeInterval) clearInterval(timeInterval);
+        timeInterval = setInterval(function () {
+          if (player && typeof player.getCurrentTime === 'function') {
+            try {
+              const curTime = player.getCurrentTime();
+              const state = typeof player.getPlayerState === 'function' ? player.getPlayerState() : -1;
+              postToParent({
+                event: 'infoDelivery',
+                info: {
+                  currentTime: curTime,
+                  playerState: state
+                }
+              });
+            } catch (err) {}
+          }
+        }, 250);
+      }
+
+      function cleanupPlayer() {
+        if (timeInterval) {
+          clearInterval(timeInterval);
+          timeInterval = null;
+        }
+        if (player) {
+          try { player.stopVideo(); } catch (e) {}
+          try { player.destroy(); } catch (e) {}
+          player = null;
+          isReady = false;
+        }
+        // Ensure player container div exists for any subsequent createPlayer call
+        var el = document.getElementById('player');
+        if (!el) {
+          el = document.createElement('div');
+          el.id = 'player';
+          document.body.appendChild(el);
+        }
+      }
+
+      function createPlayer() {
+        if (player && isReady) {
+          return;
+        }
+        cleanupPlayer();
+
+        try {
+          player = new window.YT.Player('player', {
+            videoId: currentVideoId,
+            playerVars: {
+              autoplay: autoplay,
+              start: start > 0 ? start : 0,
+              controls: 0,
+              modestbranding: 1,
+              rel: 0,
+              fs: 0,
+              playsinline: 1,
+              enablejsapi: 1,
+              cc_load_policy: 3,
+              iv_load_policy: 3,
+              origin: window.location.origin
+            },
+            events: {
+              onReady: function (event) {
+                isReady = true;
+                postToParent({ event: 'onReady' });
+                try {
+                  if (typeof event.target.unloadModule === 'function') {
+                    event.target.unloadModule('captions');
+                    event.target.unloadModule('cc');
+                  }
+                } catch (e) {}
+                if (autoplay) {
+                  try {
+                    event.target.playVideo();
+                  } catch (err) {}
+                }
+                startTimeTracking();
+              },
+              onStateChange: function (event) {
+                try {
+                  if (typeof event.target.unloadModule === 'function') {
+                    event.target.unloadModule('captions');
+                    event.target.unloadModule('cc');
+                  }
+                } catch (e) {}
+                postToParent({
+                  event: 'onStateChange',
+                  info: event.data
+                });
+              },
+              onError: function (event) {
+                postToParent({
+                  event: 'onError',
+                  info: event.data
+                });
+              }
+            }
+          });
+        } catch (err) {
+          postToParent({
+            event: 'onError',
+            info: (err && err.message) || 'Player init exception'
+          });
+        }
+      }
+
+      // 1. Assign onYouTubeIframeAPIReady FIRST before anything else!
+      window.onYouTubeIframeAPIReady = function () {
+        createPlayer();
+      };
+
+      // 2. If YT is already loaded in the environment/cache, initialize immediately!
+      if (window.YT && window.YT.Player) {
+        createPlayer();
+      } else {
+        // 3. Dynamically inject the YouTube iframe API script tag
+        var tag = document.createElement('script');
+        tag.src = 'https://www.youtube.com/iframe_api';
+        var firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+      }
+
+      // 4. Fallback: if not initialized within 1500ms, retry createPlayer if YT became available
+      setTimeout(function () {
+        if (!player && window.YT && window.YT.Player) {
+          createPlayer();
+        }
+      }, 1500);
+
+      // Listen for commands from the parent app
+      window.addEventListener('message', function (e) {
+        try {
+          var data = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+          if (!data) return;
+
+          if (data.func === 'playVideo' && player && typeof player.playVideo === 'function') {
+            player.playVideo();
+          } else if (data.func === 'pauseVideo' && player && typeof player.pauseVideo === 'function') {
+            player.pauseVideo();
+          } else if (data.func === 'seekTo' && player && typeof player.seekTo === 'function') {
+            var sec = (data.args && typeof data.args[0] === 'number') ? data.args[0] : 0;
+            player.seekTo(sec, true);
+          } else if (data.func === 'loadVideoById') {
+            var newVid = data.args && data.args[0];
+            var newStart = (data.args && typeof data.args[1] === 'number') ? data.args[1] : 0;
+            if (newVid) {
+              currentVideoId = newVid;
+              start = newStart;
+              if (player && typeof player.loadVideoById === 'function') {
+                player.loadVideoById({ videoId: newVid, startSeconds: newStart });
+              } else {
+                createPlayer();
+              }
+            }
+          } else if (data.func === 'unloadCaptions') {
+            try {
+              if (player && typeof player.unloadModule === 'function') {
+                player.unloadModule('captions');
+                player.unloadModule('cc');
+              }
+            } catch (err) {}
+          } else if (data.func === 'destroy') {
+            cleanupPlayer();
+          }
+        } catch (err) {}
+      });
+
+      // Cleanup when window/iframe is closed or navigated
+      window.addEventListener('beforeunload', cleanupPlayer);
+      window.addEventListener('pagehide', cleanupPlayer);
+    })();
+  </script>
+</body>
+</html>
